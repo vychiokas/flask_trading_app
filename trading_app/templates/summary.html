@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<h1>Account Balance</h1>
+
+<p>Cash: {{cash_balance}}</p>
+
+{% for stock, quantity in stocks.items() %}
+
+<p>Stock Name: {{stock}}, Stock quantity: {{quantity}}</p>
+{% endfor %}
+
+
+{% endblock %}

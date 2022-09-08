@@ -1,7 +1,7 @@
 from trading_app import app, db, bcrypt, forms, TOKEN
 from flask import render_template, redirect, url_for, flash, request
-from flask_login import login_required, current_user, login_user
-from trading_app.models import User
+from flask_login import login_required, current_user, login_user, logout_user
+from trading_app.models import Transaction, User
 from datetime import datetime, timedelta
 import requests
 
@@ -9,7 +9,7 @@ import requests
 @app.route("/")
 def index():
     if current_user.is_authenticated:
-        print(current_user)
+        print(current_user.id)
     else:
         print("not authenticated")
     return render_template("index.html")
@@ -57,28 +57,130 @@ def register():
     return render_template("register.html", form=form, title="register")
 
 
-@app.route("/reimbursement", methods=["GET", "POST"])
+@app.route("/top_up", methods=["GET", "POST"])
 @login_required
-def reimbursement():
-    pass
+def top_up():
+    form = forms.TopUpForm()
+    if form.validate_on_submit():
+        t = Transaction(
+            transaction_amount=form.amount.data,
+            transaction_type="top up",
+            stock_name=None,
+            user_id=current_user.id,
+        )
+        db.session.add(t)
+        db.session.commit()
+        flash("Funds have been added to your account", "success")
+        return redirect(url_for("index"))
+    return render_template("top_up.html", form=form)
 
 
-@app.route("/account_summary", methods=["GET", "POST"])
+@app.route("/account_summary")
 @login_required
 def account_summary():
-    pass
+    transactions = Transaction.query.filter_by(user_id=current_user.id).all()
+    cash_balance = sum([transaction.transaction_amount for transaction in transactions])
+    all_stock_names = set(
+        [
+            transaction.stock_name
+            for transaction in transactions
+            if transaction.stock_name is not None
+        ]
+    )
+    stocks = {}
+    for stock in all_stock_names:
+        stock_quantity = sum(
+            [
+                transaction.stock_quantity
+                for transaction in transactions
+                if transaction.stock_name == stock
+            ]
+        )
+        if stock_quantity != 0:
+            stocks[stock] = stock_quantity
+    return render_template("summary.html", cash_balance=cash_balance, stocks=stocks)
 
 
 @app.route("/trade", methods=["GET", "POST"])
 @login_required
 def trade():
-    pass
+    form = forms.TradeForm()
+    if form.validate_on_submit():
+        transactions = Transaction.query.filter_by(user_id=current_user.id)
+        yesterday = datetime.now() - timedelta(1)
+        yesterday = datetime.strftime(yesterday, "%Y-%m-%d")
+        if form.buy_sell.data == "buy":
+            cash_balance = sum(
+                [transaction.transaction_amount for transaction in transactions.all()]
+            )
+
+            url = f"https://api.polygon.io/v1/open-close/{form.name.data}/{yesterday}?adjusted=true&apiKey={TOKEN}"
+            r = requests.get(url)
+            data = r.json()
+            if data["status"] != "OK":
+                flash("Stock does not exist", "error")
+            else:
+                price = data["close"]
+                required_balance = price * form.quantity.data
+                if cash_balance >= required_balance:
+                    t = Transaction(
+                        transaction_amount=-required_balance,
+                        transaction_type=form.buy_sell.data,
+                        stock_name=form.name.data,
+                        stock_quantity=form.quantity.data,
+                        user_id=current_user.id,
+                    )
+                    db.session.add(t)
+                    db.session.commit()
+                    flash(
+                        f"Shares purchased: {form.name.data}, quantity: {form.quantity.data}",
+                        "success",
+                    )
+                else:
+                    flash(
+                        f"inssufficient funds required: {required_balance}, curently on balance {cash_balance}",
+                        "warning",
+                    )
+        if form.buy_sell.data == "sell":
+            transactions = transactions.filter_by(stock_name=form.name.data).all()
+            stocks_left = sum(
+                [
+                    transaction.stock_quantity
+                    for transaction in transactions
+                    if transaction.stock_name == form.name.data
+                ]
+            )
+            if stocks_left >= form.quantity.data:
+                url = f"https://api.polygon.io/v1/open-close/{form.name.data}/{yesterday}?adjusted=true&apiKey={TOKEN}"
+                r = requests.get(url)
+                data = r.json()
+                price = data["close"]
+
+                t = Transaction(
+                    transaction_amount=price * form.quantity.data,
+                    transaction_type=form.buy_sell.data,
+                    stock_name=form.name.data,
+                    stock_quantity=-form.quantity.data,
+                    user_id=current_user.id,
+                )
+                db.session.add(t)
+                db.session.commit()
+                flash(
+                    f"Shares sold: {form.name.data}, quantity: {form.quantity.data}",
+                    "success",
+                )
+            else:
+                flash(
+                    f"inssufficient stock {form.name.data} amount: {stocks_left}",
+                    "warning",
+                )
+    return render_template("trade.html", form=form)
 
 
 @app.route("/get_price", methods=["GET", "POST"])
 @login_required
 def get_price():
-    form = forms.StockShortName()
+    form = forms.StockShortNameForm()
     if form.validate_on_submit():
         yesterday = datetime.now() - timedelta(1)
         yesterday = datetime.strftime(yesterday, "%Y-%m-%d")
@@ -93,10 +195,11 @@ def get_price():
             return render_template(
                 "get_price.html", form=form, stock_price=data["close"]
             )
-    return render_template("get_price.html", form=form, stock_price=9999)
+    return render_template("get_price.html", form=form)
 
 
 @app.route("/logout")
 @login_required
 def logout():
-    pass
+    logout_user()
+    return redirect(url_for("index"))
